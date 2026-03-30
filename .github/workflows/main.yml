@@ -1,0 +1,35 @@
+name: 每日台股自動評分機器人
+
+on:
+  schedule:
+    # 這裡使用的是 UTC 時間 (比台灣慢 8 小時)
+    # 所以 UTC 的 13:30，就是台灣時間晚上的 21:30！
+    - cron: '30 13 * * 1-5' # 1-5 代表星期一到星期五執行
+  workflow_dispatch: # 這個設定讓你可以隨時在網頁上「手動」點擊測試按鈕
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest # 使用最新的 Linux 雲端電腦
+
+    steps:
+    - name: 1. 把倉庫裡的程式碼下載到雲端電腦
+      uses: actions/checkout@v3
+
+    - name: 2. 安裝 Python 環境
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: 3. 依照清單安裝 yfinance 和 pandas
+      run: pip install -r requirements.txt
+
+    - name: 4. 執行你的選股程式！
+      run: python update_data.py
+
+    - name: 5. 把產生出來的 Excel (CSV) 存回 GitHub 倉庫
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action Bot"
+        git add daily_stock_score.csv
+        git commit -m "🤖 自動更新今日選股名單" || echo "今天沒有新的資料改變"
+        git push
