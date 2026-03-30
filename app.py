@@ -40,4 +40,4 @@ if df is not None and not df.empty:
     df_b = df[df['總分'] == 3]
     st.dataframe(df_b.drop(columns=['更新日期']), use_container_width=True)
 else:
-    st.info("⏳ 待雲端計算完成後顯示數據，請確保已在 GitHub Actions 按下 Run Workflow。")
+    st.info("⏳ 待雲端計算完成後顯示...")
