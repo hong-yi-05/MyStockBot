@@ -8,14 +8,13 @@ headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
 }
 
-# --- 1. 自動往前抓取 3 個有開盤的交易日籌碼 ---
+# --- 1. 自動往前抓取 3 個交易日籌碼 ---
 def get_3_days_chip_data():
-    print("正在抓取近 3 個交易日的籌碼資料，請稍候...")
+    print("正在抓取近 3 個交易日的籌碼資料...")
     days_data = []
     current_date = datetime.now()
     
     while len(days_data) < 3:
-        # 避開六日 (0-4 代表週一到週五)
         if current_date.weekday() < 5:
             date_str = current_date.strftime("%Y%m%d")
             url = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={date_str}&selectType=ALL&response=json"
@@ -27,34 +26,22 @@ def get_3_days_chip_data():
                     df['證券代號'] = df['證券代號'].astype(str)
                     df['外資'] = df['外陸資買賣超股數(不含外資自營商)'].str.replace(',', '').astype(float) / 1000
                     df['投信'] = df['投信買賣超股數'].str.replace(',', '').astype(float) / 1000
-                    # 將這天的表格存入清單
                     days_data.append(df.set_index('證券代號')[['證券名稱', '外資', '投信']])
-                    print(f"✅ 成功取得 {date_str} 籌碼資料")
-                    time.sleep(2) # 禮貌性暫停，避免被證交所踢掉
-            except Exception as e:
+                    print(f"✅ 成功取得 {date_str} 籌碼")
+                    time.sleep(2)
+            except:
                 pass
         current_date -= timedelta(days=1)
-        
     return days_data
 
-# --- 主程式 ---
-# chip_tables 是一個清單，裡面包含 [今天, 昨天, 前天] 的表格
 chip_tables = get_3_days_chip_data()
-
 if len(chip_tables) < 3:
     print("❌ 抓取 3 天籌碼失敗，程式終止。")
     exit()
 
-today_chip = chip_tables[0]
-yest_chip = chip_tables[1]
-prev_chip = chip_tables[2]
+today_chip, yest_chip, prev_chip = chip_tables[0], chip_tables[1], chip_tables[2]
 
-# 直接用今天的籌碼表當作全市場股票名單
-stock_dict = {}
-for code, row in today_chip.iterrows():
-    if len(code) == 4: # 過濾出 4 位數股票
-        stock_dict[f"{code}.TW"] = row['證券名稱']
-
+stock_dict = {f"{code}.TW": row['證券名稱'] for code, row in today_chip.iterrows() if len(code) == 4}
 print(f"🚀 開始全市場掃描 (共 {len(stock_dict)} 檔)...")
 
 results = []
@@ -66,44 +53,74 @@ for ticker, name in stock_dict.items():
     if count % 100 == 0: print(f"🔄 已分析 {count} 檔...")
     
     try:
-        hist = yf.download(ticker, period="4mo", progress=False)
-        if len(hist) < 60: continue
+        # 改抓 6 個月，為了計算 100 日均線(20周線)
+        hist = yf.download(ticker, period="6mo", progress=False)
+        if len(hist) < 100: continue
         
         close_px = hist['Close'].squeeze()
         volume = hist['Volume'].squeeze()
         open_px = hist['Open'].squeeze()
+        high_px = hist['High'].squeeze()
+        low_px = hist['Low'].squeeze()
         
-        # 條件 1 & 2 & 3: 技術面
+        # 🌟 絕對門檻：5日均量必須 > 1000 張 (1張=1000股，所以是 1,000,000)
+        vol_ma5 = volume.rolling(5).mean().iloc[-1]
+        if vol_ma5 < 1000000:
+            continue
+            
+        # --- 基本 5 條件 ---
         ma_list = [close_px.rolling(w).mean().iloc[-1] for w in [5, 10, 20, 60]]
         ma_max, ma_min = max(ma_list), min(ma_list)
         
         cond1 = ((ma_max - ma_min) / ma_min) < 0.05
-        cond2 = volume.rolling(5).mean().iloc[-1] < volume.rolling(20).mean().iloc[-1]
+        cond2 = vol_ma5 < volume.rolling(20).mean().iloc[-1]
         
         curr_c, curr_o, curr_v = float(close_px.iloc[-1]), float(open_px.iloc[-1]), float(volume.iloc[-1])
-        vol_ma5 = volume.rolling(5).mean().iloc[-1]
         cond3 = (curr_c > curr_o * 1.02) and (curr_v > vol_ma5 * 1.5) and (curr_c > ma_max)
         
-        # 條件 4: 外資連買 3 天 (今天、昨天、前天都大於 0)
         f_buy_1 = today_chip.loc[code, '外資'] if code in today_chip.index else 0
         f_buy_2 = yest_chip.loc[code, '外資'] if code in yest_chip.index else 0
         f_buy_3 = prev_chip.loc[code, '外資'] if code in prev_chip.index else 0
         cond4 = (f_buy_1 > 0) and (f_buy_2 > 0) and (f_buy_3 > 0)
         
-        # 條件 5: 法人今日同買 (外資與投信今天都大於 0)
         i_buy_1 = today_chip.loc[code, '投信'] if code in today_chip.index else 0
         cond5 = (f_buy_1 > 0) and (i_buy_1 > 0)
-            
-        score = sum([cond1, cond2, cond3, cond4, cond5])
         
-        # 只要滿足 2 個條件以上就顯示
-        if score >= 2:
+        # --- 新增技術面 3 條件 ---
+        # 條件 6: KD 黃金交叉 (用 9 日 RSV 計算)
+        high_9 = high_px.rolling(9).max()
+        low_9 = low_px.rolling(9).min()
+        rsv = (close_px - low_9) / (high_9 - low_9) * 100
+        k = rsv.ewm(com=2, adjust=False).mean()
+        d = k.ewm(com=2, adjust=False).mean()
+        cond6 = (k.iloc[-1] > d.iloc[-1]) and (k.iloc[-2] <= d.iloc[-2])
+        
+        # 條件 7: 周線站上 MA20 (以日線的 100 日均線作為代理)
+        ma100 = close_px.rolling(100).mean().iloc[-1]
+        cond7 = curr_c > ma100
+        
+        # 條件 8: 跳空缺口 (今天的最低價 > 昨天的最高價)
+        cond8 = float(low_px.iloc[-1]) > float(high_px.iloc[-2])
+        
+        # --- 新增進階資料 (暫未接 API，預留欄位) ---
+        cond9 = False  # 高融券軋空
+        cond10 = False # 內部人大買
+        cond11 = False # 營收雙增/轉盈
+        
+        # 總分滿分現在是 11 分！
+        score = sum([cond1, cond2, cond3, cond4, cond5, cond6, cond7, cond8, cond9, cond10, cond11])
+        
+        # 由於條件變多，我們把上榜門檻設為 3 分以上
+        if score >= 3:
             met = []
-            if cond1: met.append("1.均線糾結")
-            if cond2: met.append("2.極致量縮")
-            if cond3: met.append("3.帶量突破")
-            if cond4: met.append("4.外資連買3天")
-            if cond5: met.append("5.法人今日同買")
+            if cond1: met.append("均線糾結")
+            if cond2: met.append("極致量縮")
+            if cond3: met.append("帶量突破")
+            if cond4: met.append("外資連買3天")
+            if cond5: met.append("法人今日同買")
+            if cond6: met.append("KD黃金交叉")
+            if cond7: met.append("站上20周線")
+            if cond8: met.append("跳空缺口")
             
             results.append({
                 "更新日期": datetime.now().strftime("%Y-%m-%d"),
@@ -111,7 +128,7 @@ for ticker, name in stock_dict.items():
                 "總分": score, "符合條件": "、".join(met)
             })
             
-    except:
+    except Exception as e:
         continue
 
 pd.DataFrame(results).sort_values(by='總分', ascending=False).to_csv("daily_stock_score.csv", index=False, encoding='utf-8-sig')
