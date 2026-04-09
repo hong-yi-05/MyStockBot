@@ -3,30 +3,10 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 import time
-import os
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-
-# --- 0. 讀取你上傳的「進階彈藥庫」 ---
-advanced_dict = {}
-try:
-    if os.path.exists("advanced_data.csv"):
-        adv_df = pd.read_csv("advanced_data.csv", dtype={'股票代號': str})
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        for _, row in adv_df.iterrows():
-            code = str(row['股票代號'])
-            exp_date = str(row.get('有效截止日', '1970-01-01'))
-            if today_str > exp_date: continue
-            advanced_dict[code] = {
-                'cond9': bool(int(row.get('高融券軋空', 0))),
-                'cond10': bool(int(row.get('營收年月雙增', 0))),
-                'exp_date': exp_date # 🌟 新增：把日期存起來
-            }
-        print(f"📥 成功載入進階數據！(共 {len(advanced_dict)} 檔有效)")
-except:
-    print("⚠️ 未偵測到有效進階數據，將以 0 分計算。")
 
 # --- 1. 抓取 3 天籌碼 ---
 def get_3_days_chip_data():
@@ -56,13 +36,17 @@ stock_dict = {f"{c}.TW": r['證券名稱'] for c, r in today_chip.iterrows() if 
 
 # --- 2. 技術面分析 ---
 results = []
-print(f"🚀 開始全市場掃描...")
+print(f"🚀 開始全市場掃描 (純雲端 8 條件版)...")
 for ticker, name in stock_dict.items():
     code = ticker.replace('.TW', '')
     try:
-        hist = yf.download(ticker, period="6mo", progress=False)
-        # 🌟 關鍵修正：必須清掉 Yahoo 產生的空白行，否則價格會變 None
+        hist = yf.download(ticker, period="6mo", progress=False, timeout=15)
         hist = hist.dropna()
+        
+        # 👻 斬殺午夜幽靈：如果最新一筆成交量是 0，剔除它！
+        if len(hist) > 0 and float(hist['Volume'].iloc[-1]) == 0:
+            hist = hist.iloc[:-1]
+            
         if len(hist) < 100: continue
 
         close_px, volume = hist['Close'].squeeze(), hist['Volume'].squeeze()
@@ -93,10 +77,8 @@ for ticker, name in stock_dict.items():
         cond7 = curr_c > close_px.rolling(100).mean().iloc[-1]
         cond8 = float(low_px.iloc[-1]) > float(high_px.iloc[-2])
 
-        adv = advanced_dict.get(code, {'cond9': False, 'cond10': False, 'exp_date': '-'})
-        cond9, cond10 = adv['cond9'], adv['cond10']
-
-        score = int(cond1) + int(cond2) + int(cond3) + int(cond4) + int(cond5) + int(cond6) + int(cond7) + int(cond8) + int(cond9) + int(cond10)
+        # 移除了 9 和 10
+        score = int(cond1) + int(cond2) + int(cond3) + int(cond4) + int(cond5) + int(cond6) + int(cond7) + int(cond8)
 
         if score >= 3:
             met = []
@@ -108,20 +90,19 @@ for ticker, name in stock_dict.items():
             if cond6: met.append("6.KD黃金交叉")
             if cond7: met.append("7.站上20周線")
             if cond8: met.append("8.跳空缺口")
-            if cond9: met.append("🔥9.高融券軋空")
-            if cond10: met.append("🔥10.營收年月雙增")
 
             results.append({
                 "更新日期": datetime.now().strftime("%Y-%m-%d"),
                 "股票代號": code, "股票名稱": name,
                 "最新收盤價": round(float(curr_c), 2),
-                "總分": int(score), "符合條件": "、".join(met),
-                "進階失效日期": adv.get('exp_date', '-') # 🌟 新增：把日期寫進報表
+                "總分": int(score), "符合條件": "、".join(met)
             })
     except: continue
 
-# 🌟 避免空資料報錯的防呆機制
-df = pd.DataFrame(results, columns=["更新日期", "股票代號", "股票名稱", "最新收盤價", "總分", "符合條件", "進階失效日期"])
+# 移除失效日期欄位
+df = pd.DataFrame(results, columns=["更新日期", "股票代號", "股票名稱", "最新收盤價", "總分", "符合條件"])
 if not df.empty:
     df = df.sort_values(by='總分', ascending=False)
 df.to_csv("daily_stock_score.csv", index=False, encoding='utf-8-sig')
+print(f"🎉 成功！共有 {len(results)} 檔上榜。")
+
